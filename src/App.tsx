@@ -1,519 +1,379 @@
-import { useState, useEffect } from 'react'
-import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
-type TransactionScope = "personal" | "business";
+type TryOnStatus = 'idle' | 'processing' | 'ready'
 
-type Transaction = {
-  id: string
-  type: 'income' | 'expense'
-  amount: number
-  category: string
-  date: string
-  note: string
-  scope: TransactionScope
+type CostControls = {
+  requireCart: boolean
+  requireLogin: boolean
+  cooldownSeconds: number
+  perSessionLimit: number
+  freeTriesPerProduct: number
 }
 
-const STORAGE_KEY = 'finance-tracker-transactions'
+const PRODUCT_OPTIONS = [
+  'AeroFlex High-Waist Leggings',
+  'CloudSoft Joggers',
+  'CoreLift Sports Bra',
+  'Everyday Relaxed Tee',
+  'MotionBlend Hoodie'
+]
 
-const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d', '#ffc658', '#ff7300']
+const COLOR_OPTIONS = ['Black', 'Sand', 'Olive', 'Stone', 'Cherry']
+const SIZE_OPTIONS = ['XS', 'S', 'M', 'L', 'XL']
 
 function App() {
-  const [transactions, setTransactions] = useState<Transaction[]>(() => {
-    if (typeof window === "undefined") return [];
+  const [selectedProduct, setSelectedProduct] = useState(PRODUCT_OPTIONS[0])
+  const [selectedColor, setSelectedColor] = useState(COLOR_OPTIONS[0])
+  const [selectedSize, setSelectedSize] = useState(SIZE_OPTIONS[2])
+  const [consentChecked, setConsentChecked] = useState(false)
+  const [status, setStatus] = useState<TryOnStatus>('idle')
+  const [progress, setProgress] = useState(0)
+  const [uploadPreview, setUploadPreview] = useState<string | null>(null)
+  const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-    try {
-      const stored = localStorage.getItem("finance-tracker-transactions");
-      if (!stored) return [];
-      
-      const parsed = JSON.parse(stored);
-      // Handle older data: default missing scope to "personal"
-      return parsed.map((t: any) => ({
-        ...t,
-        scope: t.scope || "personal"
-      }));
-    } catch (e) {
-      console.error("Failed to parse transactions from localStorage", e);
-      return [];
+  const [controls, setControls] = useState<CostControls>({
+    requireCart: true,
+    requireLogin: false,
+    cooldownSeconds: 60,
+    perSessionLimit: 2,
+    freeTriesPerProduct: 1
+  })
+
+  const [monthlyVisitors, setMonthlyVisitors] = useState(12000)
+  const [tryOnRate, setTryOnRate] = useState(0.18)
+  const [avgTryOns, setAvgTryOns] = useState(1.4)
+  const [costPerTryOn, setCostPerTryOn] = useState(0.1)
+
+  const estimatedCost = useMemo(() => {
+    return monthlyVisitors * tryOnRate * avgTryOns * costPerTryOn
+  }, [monthlyVisitors, tryOnRate, avgTryOns, costPerTryOn])
+
+  const handleUpload = (file: File | null) => {
+    if (!file) return
+    if (uploadPreview) {
+      URL.revokeObjectURL(uploadPreview)
     }
-  })
-  const [selectedMonth, setSelectedMonth] = useState<string>(new Date().toISOString().slice(0, 7))
-  const [selectedYear, setSelectedYear] = useState<string>(new Date().getFullYear().toString())
-  const [viewMode, setViewMode] = useState<"month" | "all">("month")
-  const [scopeFilter, setScopeFilter] = useState<"all" | "personal" | "business">("all")
+    setUploadPreview(URL.createObjectURL(file))
+  }
 
-  // Form state
-  const [formData, setFormData] = useState<Omit<Transaction, 'id'>>({
-    type: 'expense',
-    amount: 0,
-    category: '',
-    date: new Date().toISOString().slice(0, 10),
-    note: '',
-    scope: 'personal'
-  })
-  const [selectedCategory, setSelectedCategory] = useState<string>('')
-  const [customCategory, setCustomCategory] = useState<string>('')
-
-  const CATEGORIES = ['Food', 'Rent', 'Subscriptions', 'Transport', 'Shopping', 'Business', 'Savings', 'Custom']
-
-  // Save transactions to localStorage whenever they change
+  // Revoke object URL on unmount (and when uploadPreview changes, revoke previous)
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        "finance-tracker-transactions",
-        JSON.stringify(transactions)
-      );
-    } catch (e) {
-      console.error("Failed to save transactions to localStorage", e);
+    return () => {
+      if (uploadPreview) URL.revokeObjectURL(uploadPreview)
     }
-  }, [transactions])
+  }, [uploadPreview])
 
-  // Filter transactions by selected month and year or all transactions based on viewMode
-  const timeFilteredTransactions = viewMode === "all" 
-    ? transactions
-    : transactions.filter(t => {
-        const transactionDate = new Date(t.date)
-        const transactionMonth = transactionDate.getFullYear() + '-' + String(transactionDate.getMonth() + 1).padStart(2, '0')
-        const transactionYear = transactionDate.getFullYear().toString()
-        return transactionMonth === selectedMonth && transactionYear === selectedYear
-      })
-
-  // Apply scope filter
-  const filteredTransactions = scopeFilter === "all"
-    ? timeFilteredTransactions
-    : timeFilteredTransactions.filter(t => t.scope === scopeFilter)
-
-  // Calculate summary
-  const totalIncome = filteredTransactions
-    .filter(t => t.type === 'income')
-    .reduce((sum, t) => sum + t.amount, 0)
-
-  const totalExpenses = filteredTransactions
-    .filter(t => t.type === 'expense')
-    .reduce((sum, t) => sum + t.amount, 0)
-
-  const netBalance = totalIncome - totalExpenses
-
-  // Prepare chart data by category
-  const categoryData = filteredTransactions.reduce((acc, t) => {
-    const key = t.category || 'Uncategorized'
-    if (!acc[key]) {
-      acc[key] = { name: key, income: 0, expense: 0 }
+  // Clear progress interval on unmount to avoid state updates on unmounted component
+  useEffect(() => {
+    return () => {
+      if (progressIntervalRef.current) clearInterval(progressIntervalRef.current)
     }
-    if (t.type === 'income') {
-      acc[key].income += t.amount
-    } else {
-      acc[key].expense += t.amount
-    }
-    return acc
-  }, {} as Record<string, { name: string; income: number; expense: number }>)
+  }, [])
 
-  const chartData = Object.values(categoryData).map(cat => ({
-    name: cat.name,
-    income: cat.income,
-    expense: cat.expense
-  }))
-
-  const pieData = filteredTransactions
-    .filter(t => t.type === 'expense')
-    .reduce((acc, t) => {
-      const key = t.category || 'Uncategorized'
-      if (!acc[key]) {
-        acc[key] = 0
+  const handleGenerate = () => {
+    if (!consentChecked || !uploadPreview) return
+    if (progressIntervalRef.current) clearInterval(progressIntervalRef.current)
+    setStatus('processing')
+    setProgress(0)
+    const start = Date.now()
+    progressIntervalRef.current = setInterval(() => {
+      const elapsed = Date.now() - start
+      const nextProgress = Math.min(100, Math.round((elapsed / 5200) * 100))
+      setProgress(nextProgress)
+      if (nextProgress >= 100) {
+        if (progressIntervalRef.current) {
+          clearInterval(progressIntervalRef.current)
+          progressIntervalRef.current = null
+        }
+        setStatus('ready')
       }
-      acc[key] += t.amount
-      return acc
-    }, {} as Record<string, number>)
-
-  const pieChartData = Object.entries(pieData).map(([name, value]) => ({
-    name,
-    value
-  }))
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    
-    // Determine the final category value
-    const finalCategory = selectedCategory === 'Custom' 
-      ? customCategory.trim() 
-      : selectedCategory
-    
-    if (!finalCategory || formData.amount <= 0) {
-      alert('Please fill in all required fields with valid values.')
-      return
-    }
-
-    const newTransaction: Transaction = {
-      ...formData,
-      category: finalCategory,
-      id: Date.now().toString() + Math.random().toString(36).substr(2, 9)
-    }
-
-    setTransactions([...transactions, newTransaction])
-    setFormData({
-      type: 'expense',
-      amount: 0,
-      category: '',
-      date: new Date().toISOString().slice(0, 10),
-      note: '',
-      scope: 'personal'
-    })
-    setSelectedCategory('')
-    setCustomCategory('')
+    }, 120)
   }
-
-  const handleDelete = (id: string) => {
-    if (confirm('Are you sure you want to delete this transaction?')) {
-      setTransactions(transactions.filter(t => t.id !== id))
-    }
-  }
-
-  const exportToCSV = () => {
-    if (transactions.length === 0) {
-      alert('No transactions to export.')
-      return
-    }
-
-    const headers = ['ID', 'Type', 'Amount', 'Category', 'Date', 'Note', 'Scope']
-    const rows = transactions.map(t => [
-      t.id,
-      t.type,
-      t.amount.toString(),
-      t.category,
-      t.date,
-      t.note,
-      t.scope
-    ])
-
-    const csvContent = [
-      headers.join(','),
-      ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
-    ].join('\n')
-
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
-    const link = document.createElement('a')
-    const url = URL.createObjectURL(blob)
-    link.setAttribute('href', url)
-    link.setAttribute('download', `transactions_${new Date().toISOString().slice(0, 10)}.csv`)
-    link.style.visibility = 'hidden'
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-  }
-
-  // Generate month and year options
-  const currentYear = new Date().getFullYear()
-  const years = Array.from({ length: 10 }, (_, i) => currentYear - 5 + i)
-  const months = Array.from({ length: 12 }, (_, i) => {
-    const month = i + 1
-    return {
-      value: `${selectedYear}-${String(month).padStart(2, '0')}`,
-      label: new Date(parseInt(selectedYear), i, 1).toLocaleString('default', { month: 'long' })
-    }
-  })
 
   return (
     <div className="app">
-      <h1>💰 Personal Finance Tracker</h1>
+      <header className="hero">
+        <div className="hero-tag">Virtual Try-On for Shopify</div>
+        <h1>Pose-Preserving Try-On for Activewear + Casual</h1>
+        <p>
+          Launch a premium try-on experience directly on every product page. Instant results, privacy-first,
+          and cost control baked in.
+        </p>
+        <div className="hero-actions">
+          <button className="btn primary">Build the Try-On Flow</button>
+          <button className="btn ghost">View Cost Controls</button>
+        </div>
+      </header>
 
-      {/* Add Transaction Form */}
-      <div className="section">
-        <h2 className="section-title">Add New Transaction</h2>
-        <form onSubmit={handleSubmit}>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Type *</label>
-              <select
-                value={formData.type}
-                onChange={(e) => setFormData({ ...formData, type: e.target.value as 'income' | 'expense' })}
-                required
-              >
-                <option value="expense">Expense</option>
-                <option value="income">Income</option>
-              </select>
+      <section className="feature-grid">
+        {[
+          ['Instant Generation', 'Results in ~5–20s with pose retention and garment detail.'],
+          ['No Image Storage', 'Uploads are processed in-memory and never stored on your side.'],
+          ['Cost Guardrails', 'Rate limits, cart gating, and budget caps reduce wasted spend.'],
+          ['Product-Page Native', 'Embedded on every PDP for frictionless conversion.']
+        ].map(([title, description]) => (
+          <article key={title} className="feature-card">
+            <h3>{title}</h3>
+            <p>{description}</p>
+          </article>
+        ))}
+      </section>
+
+      <section className="workspace">
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>Try-On Builder</h2>
+              <p>Simulate the customer flow and lock in the policy.</p>
             </div>
-            <div className="form-group">
-              <label>Amount *</label>
+            <span className="badge">$0.10 per try-on</span>
+          </div>
+
+          <div className="builder-grid">
+            <div className="stack">
+              <div className="card">
+                <h4>Product selection</h4>
+                <div className="field">
+                  <label>Product</label>
+                  <select value={selectedProduct} onChange={(e) => setSelectedProduct(e.target.value)}>
+                    {PRODUCT_OPTIONS.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field-row">
+                  <div className="field">
+                    <label>Color</label>
+                    <select value={selectedColor} onChange={(e) => setSelectedColor(e.target.value)}>
+                      {COLOR_OPTIONS.map((item) => (
+                        <option key={item} value={item}>
+                          {item}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Size</label>
+                    <select value={selectedSize} onChange={(e) => setSelectedSize(e.target.value)}>
+                      {SIZE_OPTIONS.map((item) => (
+                        <option key={item} value={item}>
+                          {item}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card">
+                <h4>Customer upload</h4>
+                <p className="muted">Use a full-body front-facing photo for best results.</p>
+                <label className="upload">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => handleUpload(event.target.files?.[0] ?? null)}
+                  />
+                  {uploadPreview ? (
+                    <img src={uploadPreview} alt="Upload preview" />
+                  ) : (
+                    <div className="upload-placeholder">
+                      <span>Drag & drop or click to upload</span>
+                      <small>JPG/PNG up to 10MB</small>
+                    </div>
+                  )}
+                </label>
+                <label className="consent">
+                  <input
+                    type="checkbox"
+                    checked={consentChecked}
+                    onChange={(event) => setConsentChecked(event.target.checked)}
+                  />
+                  I consent to my image being processed for virtual try-on. We do not store images.
+                </label>
+                <button
+                  className="btn primary full"
+                  onClick={handleGenerate}
+                  disabled={!consentChecked || !uploadPreview || status === 'processing'}
+                >
+                  {status === 'processing' ? 'Generating…' : 'Generate Try-On'}
+                </button>
+                {status === 'processing' && (
+                  <div className="progress">
+                    <div className="progress-bar" style={{ width: `${progress}%` }} />
+                    <span>{progress}%</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="stack">
+              <div className="card result">
+                <h4>Try-on result</h4>
+                <p className="muted">Preview will appear here with the same pose.</p>
+                <div className="result-frame">
+                  {status === 'ready' ? (
+                    <div className="result-ready">
+                      <div className="result-image">Try-on generated</div>
+                      <div className="result-meta">
+                        <span>{selectedProduct}</span>
+                        <span>{selectedColor} · {selectedSize}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="result-placeholder">
+                      <span>No try-on yet</span>
+                      <small>Upload a photo and generate to see output.</small>
+                    </div>
+                  )}
+                </div>
+                <div className="result-actions">
+                  <button className="btn ghost">Swap Color</button>
+                  <button className="btn ghost">Download Preview</button>
+                </div>
+              </div>
+
+              <div className="card">
+                <h4>Cost control policy</h4>
+                <div className="toggle-row">
+                  <div>
+                    <p>Require Add to Cart</p>
+                    <span className="muted">Allow try-on only after intent.</span>
+                  </div>
+                  <button
+                    className={`toggle ${controls.requireCart ? 'active' : ''}`}
+                    onClick={() => setControls({ ...controls, requireCart: !controls.requireCart })}
+                  >
+                    {controls.requireCart ? 'On' : 'Off'}
+                  </button>
+                </div>
+                <div className="toggle-row">
+                  <div>
+                    <p>Login gate for extra tries</p>
+                    <span className="muted">Unlock more try-ons after email/login.</span>
+                  </div>
+                  <button
+                    className={`toggle ${controls.requireLogin ? 'active' : ''}`}
+                    onClick={() => setControls({ ...controls, requireLogin: !controls.requireLogin })}
+                  >
+                    {controls.requireLogin ? 'On' : 'Off'}
+                  </button>
+                </div>
+                <div className="range-row">
+                  <label>Cooldown (seconds)</label>
+                  <input
+                    type="range"
+                    min={10}
+                    max={180}
+                    step={10}
+                    value={controls.cooldownSeconds}
+                    onChange={(event) => setControls({ ...controls, cooldownSeconds: Number(event.target.value) })}
+                  />
+                  <span>{controls.cooldownSeconds}s</span>
+                </div>
+                <div className="range-row">
+                  <label>Per-session limit</label>
+                  <input
+                    type="range"
+                    min={1}
+                    max={5}
+                    step={1}
+                    value={controls.perSessionLimit}
+                    onChange={(event) => setControls({ ...controls, perSessionLimit: Number(event.target.value) })}
+                  />
+                  <span>{controls.perSessionLimit} tries</span>
+                </div>
+                <div className="range-row">
+                  <label>Free tries per product</label>
+                  <input
+                    type="range"
+                    min={1}
+                    max={3}
+                    step={1}
+                    value={controls.freeTriesPerProduct}
+                    onChange={(event) => setControls({ ...controls, freeTriesPerProduct: Number(event.target.value) })}
+                  />
+                  <span>{controls.freeTriesPerProduct}</span>
+                </div>
+                <div className="policy-summary">
+                  <h5>Policy summary</h5>
+                  <ul>
+                    <li>{controls.requireCart ? 'Try-on unlocked after Add to Cart.' : 'Try-on available immediately.'}</li>
+                    <li>{controls.requireLogin ? 'Login required for extra tries.' : 'No login required.'}</li>
+                    <li>Cooldown: {controls.cooldownSeconds}s between generations.</li>
+                    <li>Session cap: {controls.perSessionLimit} try-ons.</li>
+                    <li>Free tries per product: {controls.freeTriesPerProduct}.</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="budget">
+        <div className="budget-card">
+          <div>
+            <h2>Budget estimator</h2>
+            <p>Keep monthly spend capped with real numbers.</p>
+          </div>
+          <div className="budget-grid">
+            <div className="field">
+              <label>Monthly visitors</label>
+              <input
+                type="number"
+                value={monthlyVisitors}
+                onChange={(event) => setMonthlyVisitors(Number(event.target.value))}
+              />
+            </div>
+            <div className="field">
+              <label>Try-on rate</label>
               <input
                 type="number"
                 step="0.01"
-                min="0"
-                value={formData.amount || ''}
-                onChange={(e) => setFormData({ ...formData, amount: parseFloat(e.target.value) || 0 })}
-                required
+                value={tryOnRate}
+                onChange={(event) => setTryOnRate(Number(event.target.value))}
               />
             </div>
-            <div className="form-group">
-              <label>Category *</label>
-              <select
-                value={selectedCategory}
-                onChange={(e) => {
-                  setSelectedCategory(e.target.value)
-                  if (e.target.value !== 'Custom') {
-                    setCustomCategory('')
-                  }
-                }}
-                required
-              >
-                <option value="">Select a category</option>
-                {CATEGORIES.map(cat => (
-                  <option key={cat} value={cat}>{cat}</option>
-                ))}
-              </select>
-              {selectedCategory === 'Custom' && (
-                <input
-                  type="text"
-                  value={customCategory}
-                  onChange={(e) => setCustomCategory(e.target.value)}
-                  placeholder="Enter custom category"
-                  style={{ marginTop: '8px' }}
-                  required={selectedCategory === 'Custom'}
-                />
-              )}
-            </div>
-            <div className="form-group">
-              <label>Date *</label>
+            <div className="field">
+              <label>Avg try-ons / user</label>
               <input
-                type="date"
-                value={formData.date}
-                onChange={(e) => setFormData({ ...formData, date: e.target.value })}
-                required
+                type="number"
+                step="0.1"
+                value={avgTryOns}
+                onChange={(event) => setAvgTryOns(Number(event.target.value))}
+              />
+            </div>
+            <div className="field">
+              <label>Cost per try-on</label>
+              <input
+                type="number"
+                step="0.01"
+                value={costPerTryOn}
+                onChange={(event) => setCostPerTryOn(Number(event.target.value))}
               />
             </div>
           </div>
-          <div className="form-group">
-            <label>Note</label>
-            <textarea
-              value={formData.note}
-              onChange={(e) => setFormData({ ...formData, note: e.target.value })}
-              placeholder="Optional note about this transaction"
-            />
+          <div className="budget-total">
+            <span>Estimated monthly spend</span>
+            <strong>${estimatedCost.toFixed(2)}</strong>
           </div>
-          <div className="form-group">
-            <label>Scope *</label>
-            <div style={{ display: 'flex', gap: '20px', marginTop: '8px' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                <input
-                  type="radio"
-                  name="scope"
-                  value="personal"
-                  checked={formData.scope === 'personal'}
-                  onChange={(e) => setFormData({ ...formData, scope: e.target.value as TransactionScope })}
-                  required
-                />
-                <span>Personal</span>
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                <input
-                  type="radio"
-                  name="scope"
-                  value="business"
-                  checked={formData.scope === 'business'}
-                  onChange={(e) => setFormData({ ...formData, scope: e.target.value as TransactionScope })}
-                  required
-                />
-                <span>Business</span>
-              </label>
-            </div>
-          </div>
-          <button type="submit" className="btn btn-primary">Add Transaction</button>
-        </form>
-      </div>
+        </div>
 
-      {/* Filter Controls */}
-      <div className="section">
-        <div className="filter-controls">
-          <div>
-            <label style={{ marginRight: '8px' }}>Year:</label>
-            <select value={selectedYear} onChange={(e) => {
-              setSelectedYear(e.target.value)
-              setSelectedMonth(e.target.value + '-' + selectedMonth.slice(5))
-            }} disabled={viewMode === "all"}>
-              {years.map(year => (
-                <option key={year} value={year.toString()}>{year}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label style={{ marginRight: '8px' }}>Month:</label>
-            <select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} disabled={viewMode === "all"}>
-              {months.map(month => (
-                <option key={month.value} value={month.value}>{month.label}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label style={{ marginRight: '8px' }}>Scope:</label>
-            <select value={scopeFilter} onChange={(e) => setScopeFilter(e.target.value as "all" | "personal" | "business")}>
-              <option value="all">All scopes</option>
-              <option value="personal">Personal only</option>
-              <option value="business">Business only</option>
-            </select>
-          </div>
-          <button onClick={exportToCSV} className="btn btn-secondary">Export to CSV</button>
+        <div className="timeline">
+          <h2>Launch checklist</h2>
+          <ol>
+            <li>Connect AI provider + secure API key</li>
+            <li>Deploy custom backend (Vercel/Render)</li>
+            <li>Embed widget on Shopify product pages</li>
+            <li>Enable cost controls + analytics</li>
+          </ol>
         </div>
-      </div>
-
-      {/* View Mode Toggle */}
-      <div className="section" style={{ padding: '16px 24px' }}>
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center', justifyContent: 'center' }}>
-          <label style={{ marginRight: '8px', fontWeight: 600, color: 'var(--text-luxury)' }}>View:</label>
-          <button
-            onClick={() => setViewMode("month")}
-            className={`btn ${viewMode === "month" ? "btn-primary" : "btn-secondary"}`}
-            style={{ 
-              padding: '10px 20px',
-              opacity: viewMode === "month" ? 1 : 0.7
-            }}
-          >
-            This month
-          </button>
-          <button
-            onClick={() => setViewMode("all")}
-            className={`btn ${viewMode === "all" ? "btn-primary" : "btn-secondary"}`}
-            style={{ 
-              padding: '10px 20px',
-              opacity: viewMode === "all" ? 1 : 0.7
-            }}
-          >
-            All time
-          </button>
-        </div>
-      </div>
-
-      {/* Summary */}
-      <div className="summary">
-        <div className="summary-card income">
-          <h3>Total Income</h3>
-          <div className="amount">${totalIncome.toFixed(2)}</div>
-        </div>
-        <div className="summary-card expense">
-          <h3>Total Expenses</h3>
-          <div className="amount">${totalExpenses.toFixed(2)}</div>
-        </div>
-        <div className="summary-card balance">
-          <h3>Net Balance</h3>
-          <div className="amount">${netBalance.toFixed(2)}</div>
-        </div>
-      </div>
-
-      {/* Charts */}
-      {filteredTransactions.length > 0 && (
-        <div className="section">
-          <h2 className="section-title">Charts</h2>
-          {chartData.length > 0 && (
-            <div className="chart-container">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
-                  <Bar dataKey="income" fill="#27ae60" name="Income" />
-                  <Bar dataKey="expense" fill="#e74c3c" name="Expense" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-          {pieChartData.length > 0 && (
-            <div className="chart-container">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={pieChartData}
-                    cx="50%"
-                    cy="50%"
-                    labelLine={false}
-                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                    outerRadius={80}
-                    fill="#8884d8"
-                    dataKey="value"
-                  >
-                    {pieChartData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                  <Legend />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Transactions List */}
-      <div className="section">
-        <h2 className="section-title">Transactions</h2>
-        {filteredTransactions.length === 0 ? (
-          <div className="empty-state">
-            <p>{viewMode === "month" ? "No transactions found for the selected month." : "No transactions found."}</p>
-            <p>Add a transaction to get started!</p>
-          </div>
-        ) : (
-          <table className="transactions-table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Type</th>
-                <th>Category</th>
-                <th>Scope</th>
-                <th>Amount</th>
-                <th>Note</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredTransactions
-                .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-                .map(transaction => (
-                  <tr key={transaction.id}>
-                    <td>{new Date(transaction.date).toLocaleDateString()}</td>
-                    <td>
-                      <span className={`transaction-type ${transaction.type}`}>
-                        {transaction.type}
-                      </span>
-                    </td>
-                    <td>{transaction.category}</td>
-                    <td>
-                      <span style={{ 
-                        textTransform: 'capitalize',
-                        padding: '4px 8px',
-                        borderRadius: '4px',
-                        fontSize: '0.85em',
-                        fontWeight: 500,
-                        background: transaction.scope === 'business' 
-                          ? 'rgba(139, 92, 246, 0.1)' 
-                          : 'rgba(212, 175, 55, 0.1)',
-                        color: transaction.scope === 'business' 
-                          ? '#7c3aed' 
-                          : '#b8941e'
-                      }}>
-                        {transaction.scope}
-                      </span>
-                    </td>
-                    <td className={transaction.type === 'income' ? 'amount-positive' : 'amount-negative'}>
-                      {transaction.type === 'income' ? '+' : '-'}${transaction.amount.toFixed(2)}
-                    </td>
-                    <td>{transaction.note || '-'}</td>
-                    <td>
-                      <button
-                        onClick={() => handleDelete(transaction.id)}
-                        className="btn btn-secondary"
-                        style={{ padding: '5px 10px', fontSize: '12px' }}
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      </section>
     </div>
   )
 }
 
 export default App
-
